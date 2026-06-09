@@ -5,7 +5,10 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
 from models.user import User, UserInDB, UserCreate
 
-from core.security import pwd_context
+from core.security import (
+    hash_password,
+    verify_password
+)
 
 router = APIRouter()
 
@@ -25,12 +28,6 @@ fake_users_db = {
         "disabled": True,
     },
 }
-
-def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
 
 def get_user(db, username: str):
     if username in db:
