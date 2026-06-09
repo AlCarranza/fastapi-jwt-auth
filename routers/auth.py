@@ -3,7 +3,9 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, status, APIRouter
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
-from models.user import User, UserInDB
+from models.user import User, UserInDB, UserCreate
+
+from core.security import pwd_context
 
 router = APIRouter()
 
@@ -12,22 +14,23 @@ fake_users_db = {
         "username": "alexcarranza",
         "full_name": "Alex Carranza",
         "email": "alexcarranza@mail.com",
-        "hashed_password": "fakehashedsecret",
+        "hashed_password": "$2b$12$VikySdDCtXflFAps0ybeEul7JSsqnDM12gkSCnthUmhloAC.5n67S", # secret
         "disabled": False
     },
     "alice": {
         "username": "alice",
         "full_name": "Alice Wonderson",
         "email": "alice@example.com",
-        "hashed_password": "fakehashedsecret2",
+        "hashed_password": "$2b$12$4yx/m9JLDbPAL/d9v0SztOHzaf74W8TJVNg5QncxQ1CeHnTKOUhAq", # secret2
         "disabled": True,
     },
 }
 
-oauth2Scheme = OAuth2PasswordBearer(tokenUrl = "token")
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
 
-def fake_hash_password(password: str):
-    return "fakehashed" + password
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
 
 def get_user(db, username: str):
     if username in db:
@@ -70,7 +73,10 @@ async def get_current_user(token: Annotated[str, Depends(oauth2Scheme)]):
 
 async def get_current_active_user(current_user: Annotated[User, Depends(get_current_user)]):
     if current_user.disabled:
-        raise HTTPException(status_code=400, detail="Inactive user")
+        raise HTTPException(
+            status_code=401, 
+            detail="Inactive user"
+        )
     return current_user
 
 @router.post("/token")
@@ -81,15 +87,62 @@ async def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()]):
             status_code=400,
             detail="Incorrect username or password")
     user = UserInDB(**user_dict)
-    hashed_password = fake_hash_password(form_data.password)
-    if not hashed_password == user.hashed_password:
+
+    if not verify_password(
+        form_data.password,
+        user.hashed_password
+    ):
         raise HTTPException(
             status_code=400,
             detail="Incorrect username or password"
         )
     
-    return {"access_token": user.username, "token": "bearer"}
+    return {"access_token": user.username, "token_type": "bearer"}
 
-@router.get("/users/me")
+"""
+This proves your dependency chain works:
+
+/users/me
+    ↓
+get_current_active_user
+    ↓
+get_current_user
+    ↓
+fake_decode_token
+"""
+@router.get("/users/me", response_model=User)
 async def read_users_me(current_user: Annotated[User, Depends(get_current_active_user)]):
     return current_user
+
+@router.post("/register", response_model=User)
+async def register(user: UserCreate):
+
+    if user.username in fake_users_db:
+        raise HTTPException(
+            status_code=400,
+            detail="Username already exists"
+        )
+    
+    hashed_password = hash_password(user.password)
+
+    fake_users_db[user.username] = {
+        "username": user.username,
+        "email": user.email,
+        "full_name": user.full_name,
+        "hashed_password": hashed_password,
+        "disabled": False,
+    }
+
+    return {
+    "username": user.username,
+    "email": user.email,
+    "full_name": user.full_name,
+    "disabled": False,
+}
+
+"""
+Testing purposes: SHould not show passwords
+"""
+@router.get("/debug/users")
+async def debug_users():
+    return fake_users_db
