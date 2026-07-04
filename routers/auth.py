@@ -5,10 +5,9 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
 from models.user import User, UserInDB, UserCreate
 
-from core.security import (
-    hash_password,
-    verify_password
-)
+from core import security
+
+from jose import JWTError, jwt
 
 router = APIRouter()
 
@@ -31,12 +30,8 @@ fake_users_db = {
 
 def get_user(db, username: str):
     if username in db:
-        user_dict = db[username]
-        return UserInDB(**user_dict)
-
-def fake_decode_token(token):
-    user = get_user(fake_users_db, token)
-    return user
+        return UserInDB(**db[username])
+    return None
 
 # Here we use the class OAuth2PasswordBearer which is the tool provided by OAuth2 to handle the
 # authentication and security. It is designed to have the backend in a server and the auth in other,
@@ -45,7 +40,7 @@ def fake_decode_token(token):
 # In the instance we pass the parameter tokenUrl which contains the URL that the cliend will use to send
 # the username and password in order to get a token
 
-oauth2Scheme = OAuth2PasswordBearer(tokenUrl= "token")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl= "token")
 
 
 """
@@ -55,23 +50,44 @@ and will return the token as a str
 If it doesn't see an Authorization header, or the value doesn't have a Bearer token, will respond with 401 (UNAUTHORIZED)
 """
 @router.get("/items/")
-async def read_items(token: Annotated[str, Depends(oauth2Scheme)]):
+async def read_items(token: Annotated[str, Depends(oauth2_scheme)]):
     return {"token": token}
 
-async def get_current_user(token: Annotated[str, Depends(oauth2Scheme)]):
-    user = fake_decode_token(token)
-    if not user:
-        raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Not authenticated",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    try:
+        payload = jwt.decode(
+            token,
+            security.SECRET_KEY,
+            algorithms=[security.ALGORITHM]
+        )
+
+        username = payload.get("sub")
+
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    
+    user = get_user(
+        fake_users_db,
+        username
+    )
+
+    if user is None:
+        raise credentials_exception
+
     return user
 
 async def get_current_active_user(current_user: Annotated[User, Depends(get_current_user)]):
     if current_user.disabled:
         raise HTTPException(
-            status_code=401, 
+            status_code=status.HTTP_401_UNAUTHORIZED, 
             detail="Inactive user"
         )
     return current_user
@@ -81,20 +97,26 @@ async def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()]):
     user_dict = fake_users_db.get(form_data.username)
     if not user_dict:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password")
     user = UserInDB(**user_dict)
 
-    if not verify_password(
+    if not security.verify_password(
         form_data.password,
         user.hashed_password
     ):
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password"
         )
     
-    return {"access_token": user.username, "token_type": "bearer"}
+    access_token = security.create_access_token(
+        data={
+            "sub": user.username
+        }
+    )
+    
+    return {"access_token": access_token, "token_type": "bearer"}
 
 """
 This proves your dependency chain works:
@@ -105,7 +127,11 @@ get_current_active_user
     ↓
 get_current_user
     ↓
-fake_decode_token
+jwt.decode()
+    ↓
+extract "sub"
+    ↓
+get_user()
 """
 @router.get("/users/me", response_model=User)
 async def read_users_me(current_user: Annotated[User, Depends(get_current_active_user)]):
@@ -116,11 +142,11 @@ async def register(user: UserCreate):
 
     if user.username in fake_users_db:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Username already exists"
         )
     
-    hashed_password = hash_password(user.password)
+    hashed_password = security.hash_password(user.password)
 
     fake_users_db[user.username] = {
         "username": user.username,
